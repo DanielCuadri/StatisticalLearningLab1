@@ -1,0 +1,345 @@
+---
+title: "Lab 1 SL"
+author: "Daniel Cuadrillero Moles y Jaume Rodríguez"
+date: "2025-03-09"
+output: pdf_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(skimr)
+library(rsample)
+library(tree)
+library(dplyr)
+library(rpart.plot)
+library(caret)
+library(e1071)
+library(corrplot)
+library(randomForest)
+library(vip)
+library(pROC)
+library(reshape2)
+library(xgboost)
+
+```
+
+Description of the problem.
+
+# Data Preprocessing
+
+Explain the data, type variables values and distribution.
+
+```{r}
+setwd("C:/Users/jaume/Documentos/MESIO/statistical learning/task1")
+
+
+flowering_time <- read.csv("flowering_time.csv", header=FALSE)
+data <- read.csv("data.csv")
+```
+
+Group's partition uniqueness: 600 random samples
+
+```{r}
+set.seed(105836)
+plants <- cbind(data, flowering_time)
+plants_sample <- plants %>% sample_n(600)
+colnames(plants_sample)[colnames(plants_sample) == "V1"] <- "flower_time"
+plants_sample$flow_clas <- as.factor(ifelse(plants_sample$"flower_time" <= 40, 0, 1))
+
+cols_excluir <- c("long", "rec", "flow_clas")
+plants_sample[, !names(plants_sample) %in% cols_excluir] <- lapply(plants_sample[, !names(plants_sample) %in% cols_excluir], function(x) as.numeric(as.character(x)))
+``` 
+
+```{r}
+skim(plants)
+```
+
+```{r, warning=FALSE}
+df_long <- melt(plants, id.vars = 1)
+
+ggplot(df_long, aes(x = value, fill = variable)) +
+  geom_histogram(binwidth = 1, color = "black", alpha = 0.7, position = "identity") +
+  facet_wrap(~variable, scales = "free") +
+  labs(title = " ", x = "Values", y = "Frequency") +
+  theme_minimal()
+ggsave("histogramas.jpg", width = 12, height = 8, dpi = 200)
+```
+
+```{r}
+cor_matrix <- cor(plants)
+
+corrplot(cor_matrix, method = "color", type = "upper", 
+         col = colorRampPalette(c("blue", "white", "red"))(200),
+         tl.col = "black", tl.srt = 45)
+```
+
+
+```{r}
+set.seed(12345)
+plants <- subset(plants_sample, select = -flower_time)
+split <- rsample::initial_split(plants, prop = 2/3, strata = "flow_clas") 
+plants_train <- training(split)
+plants_test <- testing(split)
+```
+
+
+# Model Construction
+
+## Classification Tree
+
+
+```{r}
+plants_ct1 <- tree::tree(formula = flow_clas ~ ., data = plants_train, split = "deviance")
+```
+
+```{r}
+summary(plants_ct1)
+```
+
+```{r}
+plot(plants_ct1)
+text(plants_ct1,pretty=0, cex=0.6)
+```
+
+```{r}
+set.seed(12345)
+cv_tree <- cv.tree(plants_ct1, FUN = prune.misclass, K = 10)
+cv_tree
+```
+
+
+```{r}
+# k = 2, size = 10
+pruned_tree <- prune.misclass(plants_ct1, best = 10)
+#pruned_tree <- prune.misclass(plants_ct1, best = 15)
+plot(pruned_tree)
+text(pruned_tree,pretty=0, cex=0.6)
+```
+
+```{r}
+predictions <- predict(pruned_tree, plants_test, "class")
+
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+
+conf_matrix <- confusionMatrix(predictions, plants_test$flow_clas)
+print(conf_matrix)
+print(conf_matrix$byClass["F1"])
+
+pred_probs_prob <- predict(pruned_tree, plants_test, type = "vector")[, 2]
+
+roc_curve <- roc(plants_test$flow_clas, pred_probs_prob)
+
+print(auc(roc_curve))
+
+plot(roc_curve, col = "blue", main = "ROC Curve - Classification Tree")
+auc(roc_curve)
+
+print(conf_matrix$byClass["F1"])
+```
+
+
+## Random Forest
+
+```{r}
+set.seed(12345)
+precisiones <- numeric(1000 * 1000)
+mtry_values <- numeric(1000 * 1000)
+ntree_values <- numeric(1000 * 1000)
+
+index <- 1
+for (mtry_value in 1:18) {
+  for (ntree_value in seq(100, 1000, by = 100)) {  
+    
+    rf.plants <- randomForest(flow_clas ~ ., 
+                               data = plants_train,
+                               mtry = mtry_value,
+                               ntree = ntree_value,
+                               importance = TRUE)
+    
+    precision <- 1 - rf.plants$err.rate[ntree_value]
+    
+    mtry_values[index] <- mtry_value
+    ntree_values[index] <- ntree_value
+    precisiones[index] <- precision
+    index <- index + 1
+  }
+}
+
+resultados <- data.frame(mtry = mtry_values, ntree = ntree_values, precision = precisiones)
+
+mejor_combinacion <- resultados[which.max(resultados$precision), ]
+print(mejor_combinacion)
+
+mejor_mtry <- resultados %>%
+  group_by(mtry) %>%
+  filter(precision == max(precision)) 
+
+ggplot(mejor_mtry, aes(x = mtry, y = precision)) +
+  geom_line(data = mejor_mtry, aes(x = mtry, y = precision), color = "red") +
+  labs(title = "Precisión vs mtry",
+       x = "Valor de mtry",
+       y = "Precisión") +
+  theme_minimal()
+
+mejor_ntree <- resultados %>%
+  group_by(ntree) %>%
+  filter(precision == max(precision))
+
+ggplot(mejor_ntree, aes(x = ntree, y = precision)) +
+  geom_line(data = mejor_ntree, aes(x = ntree, y = precision), color = "blue") +
+  labs(title = "Precisión vs ntree",
+       x = "Valor de ntree",
+       y = "Precisión") +
+  theme_minimal()
+```
+
+```{r}
+set.seed(12345)
+rf.plants <- randomForest(flow_clas ~ ., 
+                               data = plants_train,
+                               mtry = mejor_combinacion$mtry,
+                               ntree = mejor_combinacion$ntree,
+                               importance = TRUE)
+
+predictions <- predict(rf.plants, newdata = plants_test)
+
+conf_matrix <- confusionMatrix(predictions, plants_test$flow_clas)
+print(conf_matrix)
+print(conf_matrix$byClass["F1"])
+
+pred_probs <- predict(rf.plants, plants_test, type = "response")
+
+pred_probs_class <- predict(rf.plants, plants_test, type = "response")
+pred_probs_prob <- predict(rf.plants, plants_test, type = "prob")[, 2]
+
+roc_curve <- roc(plants_test$flow_clas, pred_probs_prob)
+
+print(auc(roc_curve))
+
+plot(roc_curve, col = "blue", main = "ROC Curve - Random Forest")
+```
+
+```{r}
+VIP <- importance(rf.plants)
+VIP <- VIP[order(VIP[,1], decreasing = TRUE),]
+head(VIP, n=20)
+
+vip(rf.plants,num_features= 20, bar= FALSE)
+```
+
+## XBoosting model
+
+```{r boostgrid search}
+set.seed(12345)
+#quite slow
+#playing with parameter lambda
+shrink_vector <- seq(0,0.1 , 0.001)
+error_vec <- rep(0, length(shrink_vector))
+
+j <- 1
+
+
+for (i in shrink_vector) {
+  
+boosting <- gbm(as.numeric(flow_clas)-1~., data = plants_train,
+    distribution = "bernoulli", n.trees = 1000,
+    interaction.depth = 10, shrinkage = i, cv.folds = 10)
+
+test_prediction <- predict(boosting, newdata = plants_test, type = "response", n.trees = 1000)
+
+test_prediction <- ifelse(test_prediction > 0.5,
+                          1, 
+                          0)
+error_vec[j] <- mean(test_prediction == plants_test$flow_clas)
+j <- j + 1
+}
+#0.009
+
+```
+
+
+```{r boostgrid searchplot}
+plot(shrink_vector, error_vec)
+max(error_vec)
+selected_shrink <-shrink_vector[error_vec==max(error_vec)][1]
+selected_shrink
+```
+
+
+```{r}
+set.seed(12345)
+boosting <- gbm(as.numeric(flow_clas)-1~., data = plants_train,
+    distribution = "bernoulli", n.trees = 1000,
+    interaction.depth = 10, shrinkage = selected_shrink, cv.folds = 10)
+
+
+```
+
+
+```{r}
+predictions_prob <- predict(boosting, newdata = plants_test, type = "response")
+predictions <- as.factor(ifelse(predictions_prob > 0.5,
+                          1, 
+                          0))
+
+conf_matrix <- confusionMatrix(predictions, plants_test$flow_clas)
+print(conf_matrix)
+print(conf_matrix$byClass["F1"])
+
+
+roc_curve <- roc(plants_test$flow_clas, predictions_prob)
+
+print(auc(roc_curve))
+
+plot(roc_curve, col = "blue", main = "ROC Curve - XGBoost")
+```
+
+
+## Additional Model: Support Vector Machine
+
+```{r}
+normal <- function(x){
+  return((x - min(x))  / (max(x) - min(x)))  
+}
+
+
+plants_train <- plants_train[, -c(20, 21)]
+plants_test <- plants_test[, -c(20, 21)]
+
+col_excluir <- "flow_clas"
+
+plants_train[, !names(plants_train) %in% col_excluir] <- lapply(plants_train[, !names(plants_train) %in% col_excluir], normal)
+
+plants_test[, !names(plants_test) %in% col_excluir] <- lapply(plants_test[, !names(plants_test) %in% col_excluir], normal)
+```
+
+```{r}
+set.seed(12345)
+tune_svm <- tune(svm, flow_clas ~ ., data = plants_train,
+                 kernel = "radial",
+                 ranges = list(cost = c(0.001, 0.01, 0.1, 1, 10, 100), gamma = c(0.001, 0.01, 0.1, 1, 10, 100)),
+                 tunecontrol = tune.control(sampling = "cross", cross = 10),
+                 probability = TRUE)
+
+plants_svm <- tune_svm$best.model
+
+predictions <- predict(plants_svm, plants_test)
+
+conf_matrix <- confusionMatrix(predictions, plants_test$flow_clas)
+print(conf_matrix)
+
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+
+print(conf_matrix$byClass["F1"])
+
+probs <- predict(plants_svm, plants_test, probability = TRUE)
+pred_pos <- attr(probs, "probabilities")[, "1"]
+
+roc_curve <- roc(response=plants_test$flow_clas, predictor=pred_pos)
+
+plot(roc_curve, col = "blue", main = "ROC Curve - SVM")
+auc(roc_curve)
+```
+
