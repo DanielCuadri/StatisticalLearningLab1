@@ -20,7 +20,6 @@ library(vip)
 library(pROC)
 library(reshape2)
 library(xgboost)
-
 ```
 
 Description of the problem.
@@ -30,9 +29,6 @@ Description of the problem.
 Explain the data, type variables values and distribution.
 
 ```{r}
-setwd("C:/Users/jaume/Documentos/MESIO/statistical learning/task1")
-
-
 flowering_time <- read.csv("flowering_time.csv", header=FALSE)
 data <- read.csv("data.csv")
 ```
